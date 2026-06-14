@@ -1,3 +1,19 @@
+/**
+ * 语音指令匹配器 - 本地快速路径，避免简单指令走 LLM
+ *
+ * 设计思路：
+ * 1. 性能优化：简单指令（如"撤销"、"放大"、"保存图片"）用正则匹配本地执行
+ * 2. 容错处理：中文同义词、数字、模糊表达都能匹配
+ * 3. 优先级：本地匹配失败才走 DeepSeek LLM 解析
+ *
+ * 匹配流程：
+ * 1. matchImmediateVoiceCommand - 即时指令（识别到片段即可触发）
+ * 2. matchImageProviderCommand - AI 服务切换
+ * 3. matchCanvasModeSwitch - 画布模式切换
+ * 4. matchLocalVoiceCommand - 本地绘图指令
+ * 5. DeepSeek LLM - 复杂指令解析
+ */
+
 import { parseColor } from '../engines/fabricEngine'
 import { parseCellCoordFromText, parseAllCellCoordsFromText } from '../engines/gridEngine'
 import { parsePathTemplate } from '../engines/pathEngine'

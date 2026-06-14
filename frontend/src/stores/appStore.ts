@@ -1,3 +1,14 @@
+/**
+ * 应用全局状态管理（Zustand）
+ *
+ * 状态分类：
+ * 1. 画布模式与视图：canvasMode, gridCells, gridPanX/Y
+ * 2. 语音系统：voiceEnabled, voiceStatus, asrProvider, transcript
+ * 3. AI 服务配置：deepseekMode, imageProvider
+ * 4. 运行时状态：aiGenerating, backendOnline, model3d
+ * 5. UI 状态：commandManualOpen, comicDetail
+ */
+
 import { create } from 'zustand'
 import { panToCenterCell } from '../engines/gridEngine'
 import type {
@@ -13,32 +24,43 @@ import type {
 } from '../types'
 
 interface AppStore {
+  // ========== 画布模式与视图 ==========
   canvasMode: CanvasMode
+  gridCells: Record<string, GridCell>
+  selectedCellId: string | null
+  cellSize: number
+  gridPanX: number
+  gridPanY: number
+
+  // ========== 语音系统 ==========
   voiceMode: VoiceMode
   voiceEnabled: boolean
   voiceStatus: VoiceStatus
-  deepseekMode: DeepSeekMode
-  deepseekModeTouched: boolean
-  imageProvider: ImageProvider
   asrProvider: AsrProvider
   asrProviderTouched: boolean
   transcript: string
   lastReply: string
   recentCommands: string[]
-  gridCells: Record<string, GridCell>
-  selectedCellId: string | null
-  cellSize: number
-  backendOnline: boolean
-  model3d: Model3DState
+
+  // ========== AI 服务配置 ==========
+  deepseekMode: DeepSeekMode
+  deepseekModeTouched: boolean
+  imageProvider: ImageProvider
   lastAiPrompt: string
   lastAiAspect: string
   lastAiImageDataUrl: string
+
+  // ========== 运行时状态 ==========
+  backendOnline: boolean
   aiGenerating: boolean
   aiGeneratingMessage: string
+  model3d: Model3DState
+
+  // ========== UI 状态 ==========
   commandManualOpen: boolean
-  gridPanX: number
-  gridPanY: number
   comicDetail: ComicDetailState | null
+
+  // ========== Actions ==========
   setCommandManualOpen: (open: boolean) => void
   setAiGenerating: (loading: boolean, message?: string) => void
   setCanvasMode: (mode: CanvasMode) => void
@@ -65,6 +87,7 @@ interface AppStore {
   setComicDetail: (detail: ComicDetailState | null) => void
 }
 
+// 3D 模型生成任务的默认状态
 const defaultModel3d: Model3DState = {
   taskId: null,
   status: 'idle',
@@ -75,6 +98,7 @@ const defaultModel3d: Model3DState = {
 }
 
 export const useAppStore = create<AppStore>((set) => ({
+  // ========== 默认值 ==========
   canvasMode: 'free',
   voiceMode: 'continuous',
   voiceEnabled: true,
@@ -101,38 +125,54 @@ export const useAppStore = create<AppStore>((set) => ({
   aiGeneratingMessage: '',
   commandManualOpen: false,
   comicDetail: null,
+
+  // ========== Actions 实现 ==========
+  // 画布模式切换
   setCanvasMode: (canvasMode) => set({ canvasMode }),
   setVoiceMode: (voiceMode) => set({ voiceMode }),
   setVoiceEnabled: (voiceEnabled) => set({ voiceEnabled }),
   setVoiceStatus: (voiceStatus) => set({ voiceStatus }),
+
+  // DeepSeek 模式切换（fromUser 标记用户手动切换，避免自动覆盖）
   setDeepseekMode: (deepseekMode, fromUser = false) =>
     set((s) => ({
       deepseekMode,
       deepseekModeTouched: fromUser ? true : s.deepseekModeTouched,
     })),
   setImageProvider: (imageProvider) => set({ imageProvider }),
+
+  // ASR 提供商切换（fromUser 标记用户手动切换）
   setAsrProvider: (asrProvider, fromUser = false) =>
     set((s) => ({
       asrProvider,
       asrProviderTouched: fromUser ? true : s.asrProviderTouched,
     })),
+
+  // 语音转写与回复
   setTranscript: (transcript) => set({ transcript }),
   setLastReply: (lastReply) => set({ lastReply }),
+  // 最多保留最近 10 条指令
   addCommand: (cmd) =>
     set((s) => ({ recentCommands: [...s.recentCommands.slice(-9), cmd] })),
+
+  // 九宫格操作
   setGridCells: (gridCells) => set({ gridCells }),
   upsertCell: (cell) =>
     set((s) => ({ gridCells: { ...s.gridCells, [cell.id]: cell } })),
   setSelectedCellId: (selectedCellId) => set({ selectedCellId }),
+  // 九宫格视图平移
   panGridView: (dx, dy) =>
     set((s) => ({ gridPanX: s.gridPanX + dx, gridPanY: s.gridPanY + dy })),
   setGridPan: (x, y) => set({ gridPanX: x, gridPanY: y }),
   resetGridView: () => set({ gridPanX: 0, gridPanY: 0 }),
+  // 聚焦到指定格子（自动计算平移量并选中）
   focusGridCell: (cellId) =>
     set((s) => {
       const pan = panToCenterCell(cellId, s.gridCells, s.cellSize)
       return { gridPanX: pan.x, gridPanY: pan.y, selectedCellId: cellId }
     }),
+
+  // 运行时状态
   setBackendOnline: (backendOnline) => set({ backendOnline }),
   setModel3d: (patch) =>
     set((s) => ({ model3d: { ...s.model3d, ...patch } })),
@@ -144,6 +184,8 @@ export const useAppStore = create<AppStore>((set) => ({
   setLastAiImageDataUrl: (lastAiImageDataUrl) => set({ lastAiImageDataUrl }),
   setAiGenerating: (aiGenerating, message = '') =>
     set({ aiGenerating, aiGeneratingMessage: message }),
+
+  // UI 状态
   setCommandManualOpen: (commandManualOpen) => set({ commandManualOpen }),
   setComicDetail: (comicDetail) => set({ comicDetail }),
 }))

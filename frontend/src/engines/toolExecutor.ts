@@ -1,3 +1,20 @@
+/**
+ * 工具执行器 - 执行 LLM 解析出的工具调用序列
+ *
+ * 核心职责：
+ * 1. 接收 DeepSeek LLM 返回的工具调用列表
+ * 2. 按顺序执行每个工具调用（操作画布、生成图像、修改状态等）
+ * 3. 收集执行结果，用于后续的验证和修正
+ *
+ * 支持的工具类型：
+ * - 画布操作：draw_shape, draw_path, select_object, canvas_control
+ * - 样式变换：set_style, object_transform, layer_control
+ * - AI 生图：ai_generate, ai_regenerate, ai_variation
+ * - 九宫格：grid_redraw, grid_expand, batch_grid, style_sync
+ * - 漫画：comic_create_character, comic_generate_episode 等
+ * - 3D 模型：ai_generate_3d
+ */
+
 import { generateImage, generateModel3D, getModel3DTask } from '../services/api'
 import { beginGeneration, throwIfCancelled } from '../services/generationControl'
 import type { LocalCommand } from '../services/voiceCommands'
@@ -96,6 +113,11 @@ import {
   splitImageToGrid,
 } from './gridEngine'
 
+/**
+ * 工具执行上下文
+ * - canvas: Fabric.js 画布引用
+ * - onStep: 多步执行时的进度回调
+ */
 export interface ExecutorContext {
   canvas: FabricCanvasRef | null
   onStep?: (msg: string) => void
@@ -524,6 +546,22 @@ export function summarizeToolResults(
   return results.some((r) => r.success) ? '已完成' : '未能执行该操作'
 }
 
+/**
+ * 核心工具执行函数
+ *
+ * 按顺序执行 LLM 返回的工具调用列表，返回每一步的执行结果
+ * 支持的工具类型包括：
+ * - 矢量绘图（draw_shape, draw_path）
+ * - 对象操作（select_object, align_objects, distribute_objects）
+ * - 样式变换（set_style, object_transform, layer_control）
+ * - AI 生图（ai_generate, ai_regenerate, ai_variation）
+ * - 九宫格操作（grid_redraw, grid_expand, batch_grid 等）
+ * - 画布控制（zoom, pan, clear, fit_window 等）
+ *
+ * @param tools LLM 返回的工具调用列表
+ * @param ctx 执行上下文（画布引用、进度回调）
+ * @returns 每个工具的执行结果数组
+ */
 export async function executeTools(
   tools: ToolCall[],
   ctx: ExecutorContext,
@@ -531,12 +569,14 @@ export async function executeTools(
   const results: ExecutionResultItem[] = []
   const store = useAppStore.getState()
   const { canvas, onStep } = ctx
+  // 规范化工具名和参数（兼容不同 LLM 版本的输出差异）
   const normalized = tools.map((t) => ({
     name: normalizeToolName(t.name),
     arguments: normalizeToolArgs(t.name, t.arguments ?? {}),
   }))
   const total = normalized.length
 
+  // 按顺序执行每个工具调用
   for (let i = 0; i < total; i++) {
     const tool = normalized[i]
     const args = tool.arguments ?? {}
