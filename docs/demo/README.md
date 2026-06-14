@@ -1,5 +1,9 @@
 # Demo 演示视频
 
+## 在线演示
+
+**[【AI语音绘画】B 站](https://www.bilibili.com/video/BV1oCJw6nE18/)**
+
 ## 本地文件
 
 | 文件 | 说明 |
