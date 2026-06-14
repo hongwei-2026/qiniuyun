@@ -1,0 +1,39 @@
+# Environment — 切勿提交真实密钥
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# Dependencies
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Build
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output
+output-*.jpeg
+*.log
