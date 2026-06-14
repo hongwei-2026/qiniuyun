@@ -37,3 +37,8 @@ Thumbs.db
 # Output
 output-*.jpeg
 *.log
+
+# 提交打包 / 临时文件
+*.zip
+11.txt
+qiniuyun-submit.zip
