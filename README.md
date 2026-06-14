@@ -166,7 +166,7 @@ qiniuyun/
 - [x] 主分支可克隆运行（配置 `.env` 后）
 - [x] `.env` / 真实 API Key **不进入版本库**
 - [x] Demo 视频（[B 站 BV1oCJw6nE18](https://www.bilibili.com/video/BV1oCJw6nE18/)）
-- [ ] 持续 PR / commit 记录（开发过程中补充）
+- [x] PR 补录说明与分支（见 [docs/PR_HISTORY.md](docs/PR_HISTORY.md)，运行 `scripts/create-pr-history.ps1`）
 
 ---
 
