@@ -1,3 +1,13 @@
+"""
+DeepSeek LLM 服务 - 意图解析与执行验证核心模块
+
+职责：
+1. 意图解析：将自然语言指令转换为结构化工具调用序列
+2. 九宫格优化：专门优化九宫格模式的语音指令理解
+3. 执行验证：检查工具执行结果是否满足用户需求
+4. 漫画规划：漫画创作模式的专用规划器
+"""
+
 import json
 from pathlib import Path
 from typing import Any
@@ -16,9 +26,18 @@ from app.services.tool_schemas import DRAWING_TOOLS, VERIFY_TOOLS, get_tools_for
 
 
 class DeepSeekService:
+    """
+    DeepSeek API 调用封装
+
+    使用 OpenAI 兼容客户端调用 DeepSeek 模型
+    支持多模式：Flash（快速）、V4 Pro（深度推理）、Auto（自动选择）
+    """
+
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
+        # OpenAI 客户端懒加载
         self._client: OpenAI | None = None
+        # 加载各类 Prompt 模板
         self._planner_prompt = (
             Path(__file__).parent.parent / "prompts" / "planner_system.txt"
         ).read_text(encoding="utf-8")
@@ -34,6 +53,7 @@ class DeepSeekService:
 
     @property
     def client(self) -> OpenAI:
+        """懒加载 OpenAI 兼容客户端，指向 DeepSeek 服务"""
         if self._client is None:
             if not self.settings.deepseek_api_key:
                 raise ValueError("DEEPSEEK_API_KEY 未配置")
@@ -44,6 +64,11 @@ class DeepSeekService:
         return self._client
 
     def _resolve_mode(self, mode: str | None) -> str:
+        """
+        将用户友好的模式名映射到实际模型名
+        - v4-pro → deepseek-v4-pro（深度推理模式）
+        - flash/chat/auto → deepseek-chat（快速模式）
+        """
         if mode:
             mapping = {
                 "v4-pro": "deepseek-v4-pro",
@@ -55,9 +80,15 @@ class DeepSeekService:
         return self.settings.deepseek_model
 
     def _mode_label(self, mode: str | None) -> str:
+        """返回模式标签用于调试和显示"""
         return mode or self.settings.deepseek_mode
 
     def _kwargs_for_model(self, model: str, mode: str | None) -> dict[str, Any]:
+        """
+        根据模型类型构建请求参数
+        - V4 Pro 支持推理力度配置（reasoning_effort）
+        - 所有模型使用低温度（0.1）确保工具调用的稳定性
+        """
         kwargs: dict[str, Any] = {"temperature": 0.1}
         if model == "deepseek-v4-pro":
             kwargs["reasoning_effort"] = self.settings.deepseek_reasoning_effort
@@ -67,10 +98,19 @@ class DeepSeekService:
         return kwargs
 
     def _tool_choice_for_model(self, model: str) -> str:
+        """
+        选择工具调用策略
+        - V4 Pro 思考模式不支持强制工具调用（required），使用 auto
+        - 其他模型强制使用工具调用
+        """
         # v4-pro thinking mode rejects tool_choice="required"
         return "auto" if model == "deepseek-v4-pro" else "required"
 
     def _context_payload(self, context: CanvasContext) -> dict[str, Any]:
+        """
+        构建发送给 LLM 的画布上下文信息
+        包含：当前模式、缩放级别、选中格子、格子状态、最近指令等
+        """
         payload: dict[str, Any] = {
             "canvas_mode": context.canvas_mode,
             "zoom": context.zoom,
@@ -85,6 +125,10 @@ class DeepSeekService:
         return payload
 
     def _parse_tool_calls(self, message: Any) -> list[ToolCall]:
+        """
+        解析 LLM 返回的工具调用
+        将 OpenAI 格式的 tool_calls 转换为项目内部的 ToolCall 结构
+        """
         tools: list[ToolCall] = []
         tool_calls = getattr(message, "tool_calls", None) or []
         for call in tool_calls:
@@ -102,6 +146,10 @@ class DeepSeekService:
         return tools
 
     def _canvas_control_reply(self, tool: ToolCall) -> str:
+        """
+        画布控制操作的语音回复映射
+        将工具调用转换为用户友好的自然语言回复
+        """
         action = str((tool.arguments or {}).get("action") or "")
         labels = {
             "zoom_in": "已放大",
@@ -117,6 +165,10 @@ class DeepSeekService:
         return labels.get(action, "已完成")
 
     def _extract_reply(self, message: Any, tools: list[ToolCall]) -> str:
+        """
+        从 LLM 响应中提取给用户的语音回复
+        优先级：1. LLM 直接返回的内容 2. 根据工具类型生成的默认回复
+        """
         content = (getattr(message, "content", None) or "").strip()
         if content:
             return content
@@ -280,16 +332,36 @@ class DeepSeekService:
     async def parse_intent(
         self, text: str, context: CanvasContext, mode: str | None = None
     ) -> IntentParseResponse:
+        """
+        核心意图解析方法
+
+        执行流程：
+        1. 九宫格模式：先调用专门的优化器处理语音指令
+        2. 根据当前模式选择对应的 Prompt（通用规划器 / 漫画规划器）
+        3. 调用 LLM 生成工具调用序列
+        4. 九宫格模式：注入优化后的生图提示词和格子位置参数
+        5. 构建并返回解析结果
+
+        Args:
+            text: 用户语音转写文本
+            context: 画布上下文（模式、选中状态、最近指令等）
+            mode: LLM 模型模式（flash/v4-pro/auto）
+
+        Returns:
+            IntentParseResponse: 包含工具调用列表、语音回复、优化后的文本等
+        """
         model = self._resolve_mode(mode)
         optimized_text = text
         image_prompt: str | None = None
         grid_intent: dict[str, Any] = {}
 
+        # 九宫格模式：先运行专门的指令优化器
         if context.canvas_mode == "grid":
             grid_intent = await self._optimize_grid_speech(text, context, mode)
             optimized_text = str(grid_intent.get("optimized_text") or text).strip()
             image_prompt = grid_intent.get("image_prompt")
 
+        # 构建请求 payload
         payload: dict[str, Any] = {
             "user_speech": text,
             "context": self._context_payload(context),
@@ -300,6 +372,7 @@ class DeepSeekService:
             payload["grid_intent"] = grid_intent
 
         user_content = json.dumps(payload, ensure_ascii=False)
+        # 根据画布模式选择不同的规划器 Prompt
         planner_prompt = (
             self._comic_planner_prompt
             if context.canvas_mode == "comic"
@@ -311,6 +384,7 @@ class DeepSeekService:
         ]
         kwargs = self._kwargs_for_model(model, mode)
         tools = get_tools_for_mode(context.canvas_mode)
+        # 调用 LLM 进行意图解析
         response = self.client.chat.completions.create(
             model=model,
             messages=messages,
@@ -321,6 +395,7 @@ class DeepSeekService:
         )
         message = response.choices[0].message
         parsed_tools = self._parse_tool_calls(message)
+        # 处理无工具调用的情况（模型直接回复用户）
         if not parsed_tools:
             content = (getattr(message, "content", None) or "").strip()
             if content:
@@ -336,6 +411,7 @@ class DeepSeekService:
                     raw_model_output=raw,
                 )
             raise ValueError("模型未返回工具调用，请换个说法或检查 DEEPSEEK_API_KEY")
+        # 九宫格模式：注入优化后的参数
         parsed_tools = self._inject_grid_intent_args(parsed_tools, grid_intent, image_prompt)
         parsed_tools = self._inject_grid_image_prompt(parsed_tools, image_prompt)
         raw = message.model_dump_json() if hasattr(message, "model_dump_json") else str(message)
@@ -351,6 +427,20 @@ class DeepSeekService:
         )
 
     async def verify_execution(self, request: VerifyIntentRequest) -> VerifyIntentResponse:
+        """
+        执行验证 - 检查工具执行结果是否满足用户需求
+
+        设计思路：
+        - 复杂指令（如空间定位、多步操作）执行后可能存在偏差
+        - 让 LLM 再次检查执行结果与原始需求的匹配度
+        - 如果发现问题，生成修正工具调用序列
+
+        验证流程：
+        1. 将用户原始指令、上下文、计划工具、执行结果发送给 LLM
+        2. LLM 使用专用验证 Prompt 判断执行是否正确
+        3. 如果正确：返回 confirm_execution
+        4. 如果需要修正：返回 correction_tools 供前端执行
+        """
         model = self._resolve_mode(request.mode or "v4-pro")
         user_content = json.dumps(
             {
@@ -366,6 +456,7 @@ class DeepSeekService:
             {"role": "user", "content": user_content},
         ]
         kwargs = self._kwargs_for_model(model, request.mode)
+        # 调用验证工具集（confirm_execution / correction_execution）
         response = self.client.chat.completions.create(
             model=model,
             messages=messages,
@@ -376,6 +467,7 @@ class DeepSeekService:
         )
         message = response.choices[0].message
         tool_calls = getattr(message, "tool_calls", None) or []
+        # 无工具调用表示验证通过
         if not tool_calls:
             return VerifyIntentResponse(ok=True, reply="已完成", model_used=self._mode_label(request.mode))
 
@@ -386,6 +478,7 @@ class DeepSeekService:
         except json.JSONDecodeError:
             args = {}
 
+        # LLM 确认执行正确
         if name == "confirm_execution":
             return VerifyIntentResponse(
                 ok=True,
@@ -393,6 +486,7 @@ class DeepSeekService:
                 model_used=self._mode_label(request.mode),
             )
 
+        # LLM 发现问题，返回修正工具调用
         correction_tools = [
             ToolCall(name=t["name"], arguments=t.get("arguments", {}))
             for t in args.get("tools", [])
