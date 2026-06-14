@@ -38,15 +38,16 @@ export function splitSpatialClauses(text: string): { placement: string; pointTo:
 
 export function parseCanvasAnchor(text: string): CanvasAnchor | null {
   const t = splitSpatialClauses(text).placement.trim()
-  if (/画布.{0,6}(左上|左上角)|^左上(?:角)?/.test(t)) return 'top_left'
-  if (/画布.{0,6}(右上|右上角)|^右上(?:角)?/.test(t)) return 'top_right'
-  if (/画布.{0,6}(左下|左下角)|^左下(?:角)?/.test(t)) return 'bottom_left'
-  if (/画布.{0,6}(右下|右下角)|^右下(?:角)?/.test(t)) return 'bottom_right'
-  if (/画布.{0,6}(中间|中心|居中|中央)/.test(t)) return 'center'
-  if (/画布.{0,6}(上方|顶部|上边)/.test(t)) return 'top'
-  if (/画布.{0,6}(下方|底部|下边)/.test(t)) return 'bottom'
-  if (/画布.{0,6}(左侧|左边)/.test(t)) return 'left'
-  if (/画布.{0,6}(右侧|右边)/.test(t)) return 'right'
+  // 支持「在左上角画…」「画在左上角…」等口语，不仅限于句首「左上角」
+  if (/在?\s*左上(?:角)?|画布.{0,6}(左上|左上角)|^左上(?:角)?/.test(t)) return 'top_left'
+  if (/在?\s*右上(?:角)?|画布.{0,6}(右上|右上角)|^右上(?:角)?/.test(t)) return 'top_right'
+  if (/在?\s*左下(?:角)?|画布.{0,6}(左下|左下角)|^左下(?:角)?/.test(t)) return 'bottom_left'
+  if (/在?\s*右下(?:角)?|画布.{0,6}(右下|右下角)|^右下(?:角)?/.test(t)) return 'bottom_right'
+  if (/在?\s*(?:中间|中心|居中|中央)|画布.{0,6}(中间|中心|居中|中央)/.test(t)) return 'center'
+  if (/在?\s*(?:上方|顶部|上边)|画布.{0,6}(上方|顶部|上边)/.test(t)) return 'top'
+  if (/在?\s*(?:下方|底部|下边)|画布.{0,6}(下方|底部|下边)/.test(t)) return 'bottom'
+  if (/在?\s*(?:左侧|左边)|画布.{0,6}(左侧|左边)/.test(t)) return 'left'
+  if (/在?\s*(?:右侧|右边)|画布.{0,6}(右侧|右边)/.test(t)) return 'right'
   return null
 }
 

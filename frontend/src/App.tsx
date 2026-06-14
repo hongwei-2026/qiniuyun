@@ -36,6 +36,7 @@ export default function App() {
   const canvasMode = useAppStore((s) => s.canvasMode)
   const imageProvider = useAppStore((s) => s.imageProvider)
   const voiceStatus = useAppStore((s) => s.voiceStatus)
+  const voiceEnabled = useAppStore((s) => s.voiceEnabled)
   const backendOnline = useAppStore((s) => s.backendOnline)
   const aiGenerating = useAppStore((s) => s.aiGenerating)
   const aiGeneratingMessage = useAppStore((s) => s.aiGeneratingMessage)
@@ -74,8 +75,11 @@ export default function App() {
             {aiGenerating && (
               <span className="pill pill-live">AI 生图中</span>
             )}
-            {voiceStatus === 'listening' && !aiGenerating && (
+            {voiceEnabled && voiceStatus === 'listening' && !aiGenerating && (
               <span className="pill pill-live">聆听中</span>
+            )}
+            {!voiceEnabled && (
+              <span className="pill pill-warn">语音已关闭</span>
             )}
             {voiceStatus === 'awaiting_activation' && (
               <span className="pill pill-warn">语音初始化</span>

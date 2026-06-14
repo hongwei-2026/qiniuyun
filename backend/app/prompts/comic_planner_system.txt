@@ -19,7 +19,7 @@
 - 导出 PDF → comic_export_pdf
 - 关闭详情弹窗 → comic_close_detail
 - 新建漫画项目 → comic_new_project
-- 切换漫画项目 → comic_switch_project
+- 切换/选择漫画项目 → comic_switch_project（name 填序号如「二」或项目名如「漫画 2」，不要只填「漫画」）
 - 删除漫画项目 → comic_delete_project
 - 删除角色 → comic_delete_character
 - 删除某集剧本/剧情 → comic_delete_episode

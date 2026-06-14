@@ -44,6 +44,8 @@ async def transcribe_audio(file: UploadFile = File(...)):
         text = await service.transcribe_bytes(
             audio_bytes,
             filename=filename,
+            poll_interval=0.35,
+            max_wait=42.0,
         )
         return {"text": text, "provider": "xfyun"}
     except TimeoutError as e:
@@ -54,4 +56,5 @@ async def transcribe_audio(file: UploadFile = File(...)):
             return {"text": "", "provider": "xfyun"}
         raise HTTPException(status_code=400, detail=msg) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"讯飞转写失败: {e}") from e
+        # 偶发讯飞错误不阻断前端：返回空文本，避免 500 导致用户重复说话
+        return {"text": "", "provider": "xfyun", "error": str(e)}

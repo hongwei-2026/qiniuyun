@@ -192,6 +192,12 @@ export function matchDrawVoiceCommand(text: string): LocalCommand | null {
 
 /** 可立即执行的 UI 指令（识别到片段即可触发，不必等断句） */
 export function matchImmediateVoiceCommand(text: string): LocalCommand | null {
+  const raw = text.trim()
+  if (!raw) return null
+  const compact = compactVoiceText(raw)
+  const manual = matchManualCommand(raw, compact)
+  if (manual) return manual
+
   const modeSwitch = matchCanvasModeSwitch(text)
   if (modeSwitch) return modeSwitch
   if (/像素|每个格|九宫格|不同角度|漫画|角色转身|多视角/.test(text)) return null
@@ -838,13 +844,13 @@ function extractComicBackgroundText(text: string): string {
     .trim()
 }
 
-/** 从「打开默认漫画」「切换到漫画二」等口语中提取项目名 */
+/** 从「打开默认漫画」「切换到漫画二」「选择漫画二」等口语中提取项目名 */
 function extractSwitchProjectName(text: string): string | null {
   let t = text.trim().replace(/[。.!！?？，,；;]+$/g, '')
-  if (!/(切换|打开|进入)/.test(t) || /模式/.test(t)) return null
+  if (!/(切换|打开|进入|选择|选中|挑)/.test(t) || /模式/.test(t)) return null
 
   t = t
-    .replace(/^(?:请|帮我|给我)?(?:切换|打开|进入)(?:到|至|一下)?/u, '')
+    .replace(/^(?:请|帮我|给我)?(?:切换|打开|进入|选择|选中|挑)(?:到|至|一下|为)?/u, '')
     .replace(/^项目/u, '')
     .replace(/(?:吧|呀|呢|啊)$/u, '')
     .trim()
@@ -884,7 +890,14 @@ export function matchComicVoiceCommand(text: string): LocalCommand | null {
     return { type: 'comic_quick', action: 'new_project', args: { name: nameMatch?.[1] } }
   }
 
-  if (/(切换|打开|进入)/.test(t) && !/模式/.test(t)) {
+  if (/(选择|选中|挑)/.test(t) && /漫画|项目/.test(t) && !/模式|角色|剧本|分镜|页|张|图/.test(t)) {
+    const keys = parseProjectKeysFromText(t)
+    if (keys.length === 1) {
+      return { type: 'comic_quick', action: 'switch_project', args: { name: keys[0] } }
+    }
+  }
+
+  if (/(切换|打开|进入|选择|选中|挑)/.test(t) && !/模式/.test(t)) {
     const name = extractSwitchProjectName(t)
     if (name) {
       return { type: 'comic_quick', action: 'switch_project', args: { name } }

@@ -193,6 +193,7 @@ class XfyunAsrService:
 
         task_id = await self.create_task(audio_url, filename=filename)
         deadline = time.monotonic() + max_wait
+        first = True
 
         while time.monotonic() < deadline:
             result = await self.query_task(task_id)
@@ -204,6 +205,9 @@ class XfyunAsrService:
                 if text.strip():
                     return text.strip()
                 raise ValueError("未识别到有效语音，请靠近麦克风清晰说话后再试")
-            await asyncio.sleep(poll_interval)
+            if first:
+                first = False
+            else:
+                await asyncio.sleep(poll_interval)
 
         raise TimeoutError("讯飞转写超时，请稍后重试")

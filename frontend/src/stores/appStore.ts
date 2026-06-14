@@ -15,6 +15,7 @@ import type {
 interface AppStore {
   canvasMode: CanvasMode
   voiceMode: VoiceMode
+  voiceEnabled: boolean
   voiceStatus: VoiceStatus
   deepseekMode: DeepSeekMode
   deepseekModeTouched: boolean
@@ -42,6 +43,7 @@ interface AppStore {
   setAiGenerating: (loading: boolean, message?: string) => void
   setCanvasMode: (mode: CanvasMode) => void
   setVoiceMode: (mode: VoiceMode) => void
+  setVoiceEnabled: (enabled: boolean) => void
   setVoiceStatus: (status: VoiceStatus) => void
   setDeepseekMode: (mode: DeepSeekMode, fromUser?: boolean) => void
   setImageProvider: (provider: ImageProvider) => void
@@ -75,6 +77,7 @@ const defaultModel3d: Model3DState = {
 export const useAppStore = create<AppStore>((set) => ({
   canvasMode: 'free',
   voiceMode: 'continuous',
+  voiceEnabled: true,
   voiceStatus: 'idle',
   deepseekMode: 'auto',
   deepseekModeTouched: false,
@@ -100,6 +103,7 @@ export const useAppStore = create<AppStore>((set) => ({
   comicDetail: null,
   setCanvasMode: (canvasMode) => set({ canvasMode }),
   setVoiceMode: (voiceMode) => set({ voiceMode }),
+  setVoiceEnabled: (voiceEnabled) => set({ voiceEnabled }),
   setVoiceStatus: (voiceStatus) => set({ voiceStatus }),
   setDeepseekMode: (deepseekMode, fromUser = false) =>
     set((s) => ({

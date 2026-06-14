@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { parseIntent, verifyIntent, fetchConfig, checkHealth } from '../services/api'
-import { XfyunMicPipeline, isMeaningfulTranscript } from '../services/xfyunIat'
+import { XfyunMicPipeline } from '../services/xfyunIat'
 import { XfyunOstPipeline } from '../services/xfyunOst'
 import { createRecognition, getBrowserSpeechUnavailableReason, isEdgeBrowser, isSpeechRecognitionSupported, safeRecognitionStart } from '../services/speechRecognition'
 import { speak, ensureMicrophoneAccess } from '../services/systemVoice'
 import { normalizeVoiceText } from '../services/voiceTextNormalize'
+import {
+  isActionableTranscript,
+  isConfidentSpeechResult,
+  isDrawFragmentOnly,
+  isDuplicateUtterance,
+  isMeaningfulTranscript,
+} from '../services/transcriptFilter'
 import {
   HELP_MESSAGE,
   matchFuzzyUiCommand,
@@ -43,6 +50,7 @@ import {
   executeTools,
   executeWorkflowMacro,
   handleSystemCommand,
+  summarizeToolResults,
 } from '../engines/toolExecutor'
 import { saveCanvasAsPng, fitImageToCanvas } from '../engines/fabricEngine'
 import { cancelGeneration } from '../services/generationControl'
@@ -52,6 +60,7 @@ import {
   isShortUtterance,
   markUtteranceChunk,
   resetUtteranceTiming,
+  looksLikeCompleteCommand,
   PAUSE_GAP_MS,
 } from '../services/utteranceTiming'
 import { createGrid, downloadGridImage } from '../engines/gridEngine'
@@ -59,12 +68,24 @@ import { exportComicPdf } from '../engines/comicEngine'
 import type { FabricCanvasRef } from '../engines/fabricEngine'
 import type { IntentParseResponse, ToolCall } from '../types'
 
-const DEDUP_MS = 3500
+const DEDUP_MS = 6000
 const UTTERANCE_MERGE_MS = 9000
+const SPEAK_DEDUP_MS = 4500
+const TTS_ECHO_COOLDOWN_MS = 1800
+const MAX_PROCESS_BURST = 8
+const PROCESS_BURST_WINDOW_MS = 12000
+const VOICE_STUCK_RECOVER_MS = 12000
+const PROCESSING_STUCK_RECOVER_MS = 25000
 
 type ScheduleProcessOptions = {
   isFinal?: boolean
   speechEnded?: boolean
+  /** 跳过频控与部分去重（如即时指令） */
+  manual?: boolean
+}
+
+type ProcessTextOptions = {
+  manual?: boolean
 }
 
 const COMIC_AI_ACTIONS = new Set([
@@ -159,9 +180,35 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
   const browserIntentionalPauseRef = useRef(false)
   const browserRestartAttemptsRef = useRef(0)
   const attachBrowserRecognitionRef = useRef<(() => void) | null>(null)
+  const ttsCooldownUntilRef = useRef(0)
+  const lastSpeakRef = useRef({ text: '', at: 0 })
+  const speakingActiveRef = useRef(false)
+  const processBurstRef = useRef({ count: 0, windowStart: 0 })
+  const voiceStuckSinceRef = useRef(0)
+  const processingStuckSinceRef = useRef(0)
+  const utteranceBufferRef = useRef({ text: '', updatedAt: 0 })
+  const utteranceTimingRef = useRef(createUtteranceTimingState())
+
+  const shouldAcceptTranscript = useCallback((manual = false) => {
+    if (manual) return true
+    const s = useAppStore.getState()
+    if (!s.voiceEnabled) return false
+    if (Date.now() < ttsCooldownUntilRef.current) return false
+    if (['speaking', 'executing', 'optimizing'].includes(s.voiceStatus)) {
+      return false
+    }
+    return true
+  }, [])
+
+  const getPendingUtteranceText = useCallback(() => {
+    const buf = utteranceBufferRef.current.text.trim()
+    const fallback = normalizeVoiceText(useAppStore.getState().transcript).trim()
+    return buf || fallback
+  }, [])
 
   const shouldKeepBrowserListening = useCallback(() => {
     const s = useAppStore.getState()
+    if (!s.voiceEnabled) return false
     if (s.asrProvider !== 'browser') return false
     if (s.voiceMode !== 'continuous' && !utteranceModeRef.current) return false
     return !['speaking', 'executing', 'optimizing', 'awaiting_activation'].includes(s.voiceStatus)
@@ -239,11 +286,25 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
   /** 指令执行后确保麦克风恢复（防止 pause 后卡住不再识别） */
   const ensureListeningActive = useCallback(() => {
     const store = useAppStore.getState()
+    if (!store.voiceEnabled) return
+    if (processingRef.current) return
+
+    if (store.voiceStatus === 'speaking' && !speakingActiveRef.current) {
+      store.setVoiceStatus('listening')
+    }
+    if (['executing', 'optimizing'].includes(store.voiceStatus)) {
+      store.setVoiceStatus('listening')
+    }
+
+    if (Date.now() < ttsCooldownUntilRef.current) return
     if (store.voiceMode !== 'continuous' && !utteranceModeRef.current) return
     if (store.voiceStatus === 'speaking') return
 
     if (store.asrProvider === 'xfyun') {
       const pipe = recorderRef.current
+      if (pipe && 'resetIfStuck' in pipe) {
+        (pipe as XfyunOstPipeline).resetIfStuck()
+      }
       if (!pipe?.isActive()) {
         void startContinuousRef.current()
         return
@@ -274,22 +335,61 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
     }
   }, [])
 
+  const pauseListeningForWork = useCallback(() => {
+    pauseListening()
+    recorderRef.current?.pause()
+  }, [pauseListening])
+
+  const registerProcessBurst = useCallback(() => {
+    const now = Date.now()
+    const burst = processBurstRef.current
+    if (!burst.windowStart || now - burst.windowStart > PROCESS_BURST_WINDOW_MS) {
+      burst.windowStart = now
+      burst.count = 1
+      return false
+    }
+    burst.count += 1
+    if (burst.count > MAX_PROCESS_BURST) {
+      const store = useAppStore.getState()
+      store.setLastReply('指令较快，请稍候再说')
+      return true
+    }
+    return false
+  }, [])
+
   const speakAndMaybeResume = useCallback((message: string, resume = true) => {
     const store = useAppStore.getState()
+    const now = Date.now()
+    const trimmed = message.trim()
+    if (
+      trimmed
+      && (speakingActiveRef.current || (trimmed === lastSpeakRef.current.text && now - lastSpeakRef.current.at < SPEAK_DEDUP_MS))
+    ) {
+      if (resume && store.voiceEnabled && store.voiceMode === 'continuous') {
+        window.setTimeout(() => { ensureListeningActive() }, TTS_ECHO_COOLDOWN_MS)
+      }
+      return
+    }
+    lastSpeakRef.current = { text: trimmed, at: now }
+    speakingActiveRef.current = true
+
     pauseListening()
+    recorderRef.current?.pause()
     store.setLastReply(message)
     store.setVoiceStatus('speaking')
-    shouldResumeRef.current = resume && store.voiceMode === 'continuous' && !utteranceModeRef.current
+    shouldResumeRef.current = resume && store.voiceEnabled && store.voiceMode === 'continuous' && !utteranceModeRef.current
 
     let done = false
     const finish = () => {
       if (done) return
       done = true
+      speakingActiveRef.current = false
+      ttsCooldownUntilRef.current = Date.now() + TTS_ECHO_COOLDOWN_MS
       const s = useAppStore.getState()
       if (shouldResumeRef.current) {
         shouldResumeRef.current = false
         s.setVoiceStatus('listening')
-        window.setTimeout(() => { ensureListeningActive() }, 200)
+        window.setTimeout(() => { ensureListeningActive() }, TTS_ECHO_COOLDOWN_MS)
       } else {
         s.setVoiceStatus('idle')
       }
@@ -317,12 +417,12 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
             store.setCanvasMode('free')
           }
           store.setCommandManualOpen(true)
-          speakAndMaybeResume('已打开指令手册', true)
+          store.setLastReply('已打开指令手册')
           return true
         }
         case 'close_manual':
           store.setCommandManualOpen(false)
-          speakAndMaybeResume('已关闭指令手册', true)
+          store.setLastReply('已关闭指令手册')
           return true
         case 'stop_generation': {
           cancelGeneration()
@@ -331,10 +431,13 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
           return true
         }
         case 'stop_listening':
+          store.setVoiceEnabled(false)
+          browserIntentionalPauseRef.current = true
           stopListening()
           speakAndMaybeResume('已停止聆听', false)
           return true
         case 'start_listening':
+          store.setVoiceEnabled(true)
           stopListening()
           window.setTimeout(() => { void startContinuousRef.current() }, 100)
           speakAndMaybeResume('已开始聆听，请说话', true)
@@ -685,8 +788,8 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
 
         utteranceModeRef.current = false
         const stepCount = intent.tools.length + correctionTools.length
-        let reply = verify.reply || intent.reply || '已完成'
-        if (stepCount > 1) {
+        let reply = summarizeToolResults(results, verify.reply || intent.reply || '已完成')
+        if (stepCount > 1 && !reply.includes('步')) {
           reply = `${reply}，共完成${stepCount}步`
         }
         speakAndMaybeResume(reply, true)
@@ -815,18 +918,9 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
   )
 
   const processText = useCallback(
-    async (rawText: string) => {
+    async (rawText: string, opts?: ProcessTextOptions) => {
       const text = normalizeVoiceText(rawText)
       if (!text.trim() || !isMeaningfulTranscript(text)) return
-      if (processingRef.current) {
-        // 仍在处理上一句时仍更新识别文本，避免界面“假死”
-        useAppStore.getState().setTranscript(text)
-        return
-      }
-
-      const store = useAppStore.getState()
-      store.addCommand(text)
-      store.setTranscript(text)
 
       const immediate = matchImmediateVoiceCommand(text)
       if (immediate?.type === 'utterance_start') {
@@ -840,6 +934,35 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
         return
       }
 
+      if (!isActionableTranscript(text)) return
+      if (!opts?.manual && isDrawFragmentOnly(text)) return
+      if (!shouldAcceptTranscript(opts?.manual)) return
+
+      if (!opts?.manual) {
+        const last = lastProcessedRef.current
+        if (isDuplicateUtterance(text, last.text, last.at, DEDUP_MS)) return
+        if (registerProcessBurst()) return
+      }
+
+      lastProcessedRef.current = { text, at: Date.now() }
+
+      if (processingRef.current) {
+        if (opts?.manual) {
+          useAppStore.getState().setLastReply('上一条指令仍在执行，请稍候')
+        } else {
+          useAppStore.getState().setTranscript(text)
+        }
+        return
+      }
+
+      processingRef.current = true
+      pauseListeningForWork()
+
+      const store = useAppStore.getState()
+      store.addCommand(text)
+      store.setTranscript(text)
+
+      try {
       const providerSwitch = matchImageProviderCommand(text)
       if (providerSwitch && handleLocalCommand(providerSwitch)) {
         utteranceModeRef.current = false
@@ -891,12 +1014,7 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
             return
           }
           if (isGridAiCommand(gridEarly)) {
-            processingRef.current = true
-            try {
-              await runGridAiPipeline(text, gridEarly)
-            } finally {
-              processingRef.current = false
-            }
+            await runGridAiPipeline(text, gridEarly)
             utteranceModeRef.current = false
             return
           }
@@ -947,33 +1065,18 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
             return
           }
           if (isGridAiCommand(gridCmd)) {
-            processingRef.current = true
-            try {
-              await runGridAiPipeline(text, gridCmd)
-            } finally {
-              processingRef.current = false
-            }
+            await runGridAiPipeline(text, gridCmd)
             utteranceModeRef.current = false
             return
           }
         }
-        processingRef.current = true
-        try {
-          await runDeepSeekPipeline(text)
-        } finally {
-          processingRef.current = false
-        }
+        await runDeepSeekPipeline(text)
         utteranceModeRef.current = false
         return
       }
 
       if (store.canvasMode === 'comic') {
-        processingRef.current = true
-        try {
-          await runComicAiPipeline(text)
-        } finally {
-          processingRef.current = false
-        }
+        await runComicAiPipeline(text)
         utteranceModeRef.current = false
         return
       }
@@ -1003,19 +1106,27 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
         }
       }
 
-      // 矢量绘图走 DeepSeek function calling + Fabric 执行；复杂指令或 Pro 模式才验收
-      processingRef.current = true
-      try {
-        await runDeepSeekPipeline(text)
+      await runDeepSeekPipeline(text)
+      utteranceModeRef.current = false
       } finally {
         processingRef.current = false
+        ensureListeningActive()
+        window.setTimeout(() => { ensureListeningActive() }, TTS_ECHO_COOLDOWN_MS)
       }
     },
-    [handleLocalCommand, runDeepSeekPipeline, runGridAiPipeline, runComicAiPipeline, speakAndMaybeResume],
+    [
+      handleLocalCommand,
+      runDeepSeekPipeline,
+      runGridAiPipeline,
+      runComicAiPipeline,
+      speakAndMaybeResume,
+      shouldAcceptTranscript,
+      registerProcessBurst,
+      pauseListeningForWork,
+      ensureListeningActive,
+      resumeListening,
+    ],
   )
-
-  const utteranceBufferRef = useRef({ text: '', updatedAt: 0 })
-  const utteranceTimingRef = useRef(createUtteranceTimingState())
 
   const mergeUtteranceText = useCallback((incoming: string) => {
     const norm = normalizeVoiceText(incoming).trim()
@@ -1054,53 +1165,81 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
       const store = useAppStore.getState()
       if (store.voiceMode !== 'continuous' && !utteranceModeRef.current) return
       if (!text.trim() || !isMeaningfulTranscript(text)) return
+      if (!isActionableTranscript(text)) return
+      if (!shouldAcceptTranscript(opts?.manual)) return
 
       markUtteranceChunk(utteranceTimingRef.current)
       const combined = mergeUtteranceText(text)
       store.setTranscript(combined)
-      const timing = utteranceTimingRef.current
-      const delayMs = computeAdaptiveSilenceMs(combined, {
-        hadMidPause: timing.hadMidPause,
-        isFinal: opts?.isFinal ?? false,
-        speechEnded: opts?.speechEnded ?? false,
-      })
 
-      if (silenceTimerRef.current) window.clearTimeout(silenceTimerRef.current)
-      silenceTimerRef.current = window.setTimeout(() => {
+      if (opts?.manual) {
+        if (silenceTimerRef.current) window.clearTimeout(silenceTimerRef.current)
         const now = Date.now()
         const last = lastProcessedRef.current
         if (combined === last.text && now - last.at < DEDUP_MS) return
-        lastProcessedRef.current = { text: combined, at: now }
+        clearUtteranceBuffer()
+        void processText(combined, { manual: true })
+        return
+      }
+
+      // 浏览器识别：等 final 结果或短延迟自动执行
+      if (store.asrProvider === 'browser' && !opts?.isFinal && !opts?.speechEnded) {
+        return
+      }
+
+      const timing = utteranceTimingRef.current
+      const delayMs = opts?.isFinal || opts?.speechEnded
+        ? Math.min(500, computeAdaptiveSilenceMs(combined, {
+          hadMidPause: timing.hadMidPause,
+          isFinal: true,
+          speechEnded: opts?.speechEnded ?? false,
+        }))
+        : computeAdaptiveSilenceMs(combined, {
+          hadMidPause: timing.hadMidPause,
+          isFinal: opts?.isFinal ?? false,
+          speechEnded: opts?.speechEnded ?? false,
+        })
+
+      if (silenceTimerRef.current) window.clearTimeout(silenceTimerRef.current)
+      silenceTimerRef.current = window.setTimeout(() => {
+        const last = lastProcessedRef.current
+        if (isDuplicateUtterance(combined, last.text, last.at, DEDUP_MS)) return
         clearUtteranceBuffer()
         void processText(combined)
       }, delayMs)
     },
-    [processText, mergeUtteranceText, clearUtteranceBuffer],
+    [processText, mergeUtteranceText, clearUtteranceBuffer, shouldAcceptTranscript],
   )
 
   const scheduleSpeechEnd = useCallback(() => {
-    const combined = utteranceBufferRef.current.text.trim()
-    const fallback = normalizeVoiceText(useAppStore.getState().transcript).trim()
-    const text = combined || fallback
-    if (text) scheduleProcess(text, { speechEnded: true })
-  }, [scheduleProcess])
+    const text = getPendingUtteranceText()
+    if (!text || !isMeaningfulTranscript(text)) return
+    if (isDrawFragmentOnly(text)) return
+    const last = lastProcessedRef.current
+    if (isDuplicateUtterance(text, last.text, last.at, DEDUP_MS)) return
+    scheduleProcess(text, { speechEnded: true })
+  }, [scheduleProcess, getPendingUtteranceText])
 
   const handleInterimText = useCallback(
     (rawText: string) => {
       if (!isMeaningfulTranscript(rawText)) return
       const store = useAppStore.getState()
-      store.setTranscript(rawText)
       const text = normalizeVoiceText(rawText)
+      const combined = mergeUtteranceText(text)
+      store.setTranscript(combined || rawText)
+
       const quick = matchImmediateVoiceCommand(text)
       if (quick) {
         if (silenceTimerRef.current) window.clearTimeout(silenceTimerRef.current)
-        lastProcessedRef.current = { text, at: Date.now() }
-        void processText(text)
+        clearUtteranceBuffer()
+        void processText(text, { manual: true })
         return
       }
-      scheduleProcess(text)
+
+      // 只累积文本，等转写完成或断句后自动执行
+      if (!shouldAcceptTranscript()) return
     },
-    [processText, scheduleProcess],
+    [processText, shouldAcceptTranscript, mergeUtteranceText, clearUtteranceBuffer],
   )
 
   const handleXfyunError = useCallback((message: string, product: 'iat' | 'ost') => {
@@ -1203,13 +1342,16 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
     }
 
     const recognition = createRecognition(
-      (text, isFinal) => {
+      (text, isFinal, confidence) => {
         browserRestartAttemptsRef.current = 0
         if (!text) return
+        if (!isConfidentSpeechResult(confidence, isFinal)) return
         store.setTranscript(text)
         const normalized = normalizeVoiceText(text)
         if (isFinal) {
-          scheduleProcess(normalized, { isFinal: true })
+          if (looksLikeCompleteCommand(normalized)) {
+            scheduleProcess(normalized, { isFinal: true })
+          }
         } else {
           handleInterimText(text)
         }
@@ -1248,23 +1390,18 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
 
     recognitionRef.current = null
     browserRestartAttemptsRef.current += 1
-    if (browserRestartAttemptsRef.current >= 6) {
-      store.setLastReply(
-        isEdgeBrowser()
-          ? 'Edge 浏览器识别多次重连失败，请点「重新聆听」或改用讯飞识别'
-          : '浏览器识别连接失败，请点「重新聆听」或改用讯飞识别',
-      )
-      store.setVoiceStatus('idle')
-      return
+    const backoff = Math.min(4000, 400 + browserRestartAttemptsRef.current * 350)
+    if (browserRestartAttemptsRef.current % 5 === 0) {
+      store.setLastReply('浏览器识别会话已断开，正在自动重连…')
     }
-    store.setLastReply('浏览器识别会话已断开，正在自动重连…')
-    scheduleBrowserReconnect(600)
+    scheduleBrowserReconnect(backoff)
   }, [handleInterimText, scheduleBrowserReconnect, scheduleProcess, shouldKeepBrowserListening])
 
   attachBrowserRecognitionRef.current = attachBrowserRecognition
 
   const startContinuous = useCallback(async () => {
     const store = useAppStore.getState()
+    if (!store.voiceEnabled) return
     if (['speaking', 'executing', 'optimizing'].includes(store.voiceStatus)) return
 
     const micError = await ensureMicrophoneAccess()
@@ -1313,6 +1450,7 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
 
   const bootstrapVoice = useCallback(async () => {
     const store = useAppStore.getState()
+    if (!store.voiceEnabled) return false
 
     try {
       const online = await checkHealth()
@@ -1374,8 +1512,38 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
     }
 
     const onRestartListening = () => {
+      useAppStore.getState().setVoiceEnabled(true)
       stopListening()
       window.setTimeout(() => { void startContinuous() }, 120)
+    }
+
+    const onVoiceToggleKey = (e: KeyboardEvent) => {
+      if (e.key !== 'q' && e.key !== 'Q') return
+      if (e.repeat) return
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const target = e.target as HTMLElement | null
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return
+
+      e.preventDefault()
+      e.stopPropagation()
+
+      const store = useAppStore.getState()
+
+      if (store.voiceEnabled) {
+        processBurstRef.current = { count: 0, windowStart: 0 }
+        store.setVoiceEnabled(false)
+        browserIntentionalPauseRef.current = true
+        stopListening()
+        store.setLastReply('语音已关闭，按 Q 开启')
+        store.setVoiceStatus('idle')
+        return
+      }
+
+      processBurstRef.current = { count: 0, windowStart: 0 }
+      store.setVoiceEnabled(true)
+      browserIntentionalPauseRef.current = false
+      store.setLastReply('语音已开启，请说话')
+      void bootstrapVoice()
     }
 
     const onAsrSwitch = (ev: Event) => {
@@ -1393,15 +1561,56 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
     document.addEventListener('voicecanvas:asr-switch', onAsrSwitch)
     document.addEventListener('pointerdown', activate)
     document.addEventListener('keydown', activate)
+    document.addEventListener('keydown', onVoiceToggleKey, true)
 
-    const timer = window.setTimeout(() => { void bootstrapVoice() }, 400)
+    const timer = window.setTimeout(() => {
+      if (useAppStore.getState().voiceEnabled) void bootstrapVoice()
+    }, 400)
 
     const watchdog = window.setInterval(() => {
       const s = useAppStore.getState()
+      const now = Date.now()
+
+      if (processingRef.current) {
+        if (!processingStuckSinceRef.current) processingStuckSinceRef.current = now
+        else if (now - processingStuckSinceRef.current > PROCESSING_STUCK_RECOVER_MS) {
+          processingRef.current = false
+          processingStuckSinceRef.current = 0
+          speakingActiveRef.current = false
+          ttsCooldownUntilRef.current = 0
+          s.setLastReply('指令执行超时，已恢复聆听')
+          s.setVoiceStatus('listening')
+          ensureListeningActive()
+        }
+      } else {
+        processingStuckSinceRef.current = 0
+      }
+
+      if (['speaking', 'executing', 'optimizing', 'transcribing'].includes(s.voiceStatus)) {
+        if (!voiceStuckSinceRef.current) voiceStuckSinceRef.current = now
+        else if (now - voiceStuckSinceRef.current > VOICE_STUCK_RECOVER_MS) {
+          voiceStuckSinceRef.current = 0
+          speakingActiveRef.current = false
+          ttsCooldownUntilRef.current = 0
+          processingRef.current = false
+          s.setLastReply('语音状态卡住，已恢复聆听')
+          s.setVoiceStatus('listening')
+          ensureListeningActive()
+        }
+      } else {
+        voiceStuckSinceRef.current = 0
+      }
+
+      if (!s.voiceEnabled) return
       if (s.voiceMode !== 'continuous') return
-      if (['speaking', 'executing', 'optimizing', 'awaiting_activation'].includes(s.voiceStatus)) return
+      if (s.voiceStatus === 'awaiting_activation') return
+      if (['speaking', 'executing', 'optimizing', 'transcribing'].includes(s.voiceStatus)) return
+
       if (s.asrProvider === 'xfyun') {
         const pipe = recorderRef.current
+        if (pipe && 'resetIfStuck' in pipe) {
+          (pipe as XfyunOstPipeline).resetIfStuck()
+        }
         if (!pipe?.isActive()) {
           void resumeListening(true)
         } else if (pipe.isPaused() || (!pipe.isConnected() && !pipe.isConnecting())) {
@@ -1420,6 +1629,7 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
     }, 2000)
 
     const activationRetry = window.setInterval(() => {
+      if (!useAppStore.getState().voiceEnabled) return
       if (useAppStore.getState().voiceStatus === 'awaiting_activation') {
         void bootstrapVoice()
       }
@@ -1432,6 +1642,7 @@ export function useVoicePipeline(getCanvas: () => FabricCanvasRef | null) {
       document.removeEventListener('voicecanvas:resume', onResume)
       document.removeEventListener('pointerdown', activate)
       document.removeEventListener('keydown', activate)
+      document.removeEventListener('keydown', onVoiceToggleKey, true)
       document.removeEventListener('voicecanvas:restart-listening', onRestartListening)
       document.removeEventListener('voicecanvas:asr-switch', onAsrSwitch)
       stopListening()

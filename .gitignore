@@ -42,3 +42,6 @@ output-*.jpeg
 *.zip
 11.txt
 qiniuyun-submit.zip
+
+# Demo 视频体积过大，放 B 站/云盘，README 贴链接（本地保留 docs/demo/voicecanvas-demo.mp4）
+docs/demo/*.mp4

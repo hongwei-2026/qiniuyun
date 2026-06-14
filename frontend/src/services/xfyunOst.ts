@@ -1,14 +1,25 @@
 import { transcribeAudio } from './api'
+import { loadXfyunPcmWorklet } from './xfyunWorklet'
 
 const TARGET_SAMPLE_RATE = 16000
-/** 说完话后多久判定为「已结束」（用于极速转写 VAD） */
-const QUIET_AFTER_SPEECH_MS = 700
-/** 有语音活动才上传；窗口加长，减少句中停顿被切断 */
-const WINDOW_MS = 9000
-/** 最短有效音频（约 0.5s @16kHz） */
-const MIN_SAMPLES = 8000
-/** RMS 阈值：低于此视为静音，不请求转写 */
-const SPEECH_RMS_THRESHOLD = 0.006
+/** 说完话后静音多久再转写 */
+const QUIET_AFTER_SPEECH_MS = 500
+/** 两次转写 API 最短间隔 */
+const MIN_FLUSH_INTERVAL_MS = 600
+/** 转写开始后短暂回声抑制（仅影响触发新一段，不阻断采音） */
+const ECHO_GUARD_MS = 350
+/** 句首预录回溯时长 */
+const PREROLL_TAIL_MS = 450
+/** 单次上传最长有效语音（秒） */
+const MAX_TRANSCRIBE_SECONDS = 7
+/** 与后端 max_wait 对齐 */
+const TRANSCRIBE_TIMEOUT_MS = 48000
+/** 转写卡住后强制恢复 */
+const TRANSCRIBE_STUCK_MS = 50000
+/** 最短有效音频（约 0.4s @16kHz） */
+const MIN_SAMPLES = 6400
+/** RMS 阈值 */
+const SPEECH_RMS_THRESHOLD = 0.014
 
 function mergeFloat32(chunks: Float32Array[]): Float32Array {
   const total = chunks.reduce((n, c) => n + c.length, 0)
@@ -74,10 +85,8 @@ function encodeWav(samples: Float32Array, sampleRate: number): Blob {
   return new Blob([buffer], { type: 'audio/wav' })
 }
 
-let workletModuleLoaded = false
-
 /**
- * 讯飞极速录音转写（OST）：检测到语音活动后才上传，避免静音刷接口。
+ * 讯飞极速录音转写（OST）：采音与上传转写解耦，转写进行中仍可说下一句。
  */
 export class XfyunOstPipeline {
   private stream: MediaStream | null = null
@@ -86,15 +95,21 @@ export class XfyunOstPipeline {
   private worklet: AudioWorkletNode | null = null
   private audioReady = false
   private chunks: Float32Array[] = []
-  private windowTimer: number | null = null
   private transcribing = false
+  private transcribeStartedAt = 0
+  private pendingTranscribes = 0
+  private transcribeChain: Promise<void> = Promise.resolve()
   private paused = false
   private destroyed = false
   private onInterim: ((text: string) => void) | null = null
   private onSpeechEnd: (() => void) | null = null
   private onError: ((message: string) => void) | null = null
-  private lastSpeechAt = 0
   private quietTimer: number | null = null
+  private echoGuardUntil = 0
+  private lastFlushAt = 0
+  private preRollChunks: Float32Array[] = []
+  private preRollSamples = 0
+  private speechActive = false
 
   isActive(): boolean {
     return !this.destroyed && !!this.stream && this.audioReady
@@ -105,7 +120,16 @@ export class XfyunOstPipeline {
   }
 
   isConnecting(): boolean {
-    return this.transcribing
+    return this.pendingTranscribes > 0
+  }
+
+  resetIfStuck(): boolean {
+    if (this.pendingTranscribes === 0) return false
+    if (Date.now() - this.transcribeStartedAt < TRANSCRIBE_STUCK_MS) return false
+    this.pendingTranscribes = 0
+    this.transcribing = false
+    this.transcribeChain = Promise.resolve()
+    return true
   }
 
   isPaused(): boolean {
@@ -114,7 +138,6 @@ export class XfyunOstPipeline {
 
   pause(): void {
     this.paused = true
-    this.clearWindowTimer()
     this.clearQuietTimer()
   }
 
@@ -122,10 +145,8 @@ export class XfyunOstPipeline {
     if (this.destroyed) return
     this.paused = false
     void this.context?.resume()
-    this.scheduleWindow()
   }
 
-  /** 浏览器策略：须用户点击后 resume，否则采不到音 */
   async resumeAudioContext(): Promise<boolean> {
     if (!this.context) return false
     if (this.context.state === 'suspended') {
@@ -141,6 +162,10 @@ export class XfyunOstPipeline {
   ): Promise<void> {
     this.destroyed = false
     this.paused = false
+    this.echoGuardUntil = 0
+    this.lastFlushAt = 0
+    this.pendingTranscribes = 0
+    this.transcribeChain = Promise.resolve()
     this.onInterim = onInterim
     this.onSpeechEnd = onSpeechEnd
     this.onError = onError
@@ -149,9 +174,9 @@ export class XfyunOstPipeline {
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
         },
       })
     }
@@ -160,7 +185,6 @@ export class XfyunOstPipeline {
     if (this.context?.state === 'suspended') {
       await this.context.resume()
     }
-    this.scheduleWindow()
   }
 
   private async setupAudioCapture(): Promise<void> {
@@ -170,15 +194,34 @@ export class XfyunOstPipeline {
     this.context = new AudioContext()
     this.source = this.context.createMediaStreamSource(this.stream!)
 
-    if (!workletModuleLoaded) {
-      await this.context.audioWorklet.addModule('/xfyun-pcm-processor.js')
-      workletModuleLoaded = true
-    }
+    await loadXfyunPcmWorklet(this.context)
 
     this.worklet = new AudioWorkletNode(this.context, 'xfyun-pcm-processor')
     this.worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {
       if (this.paused || this.destroyed) return
-      this.chunks.push(event.data)
+      const chunk = event.data
+      const sampleRate = this.context?.sampleRate ?? 48000
+      const maxPreRollSamples = Math.floor(sampleRate * PREROLL_TAIL_MS / 1000)
+
+      this.preRollChunks.push(chunk)
+      this.preRollSamples += chunk.length
+      while (this.preRollSamples > maxPreRollSamples && this.preRollChunks.length) {
+        const dropped = this.preRollChunks.shift()!
+        this.preRollSamples -= dropped.length
+      }
+
+      const loud = measureRms(chunk) >= SPEECH_RMS_THRESHOLD
+      if (loud) {
+        if (!this.speechActive) {
+          this.speechActive = true
+          this.chunks.push(...this.preRollChunks)
+        } else {
+          this.chunks.push(chunk)
+        }
+        this.markSpeechActivity()
+      } else if (this.speechActive) {
+        this.chunks.push(chunk)
+      }
     }
 
     const silent = this.context.createGain()
@@ -207,71 +250,85 @@ export class XfyunOstPipeline {
     }
   }
 
-  /** 检测到语音后，静音一段时间则视为「本段说完了」 */
   private markSpeechActivity(): void {
-    this.lastSpeechAt = Date.now()
+    if (Date.now() < this.echoGuardUntil) return
     this.clearQuietTimer()
     this.quietTimer = window.setTimeout(() => {
       this.quietTimer = null
-      if (!this.destroyed && !this.paused && Date.now() - this.lastSpeechAt >= QUIET_AFTER_SPEECH_MS - 50) {
-        this.onSpeechEnd?.()
-      }
+      if (this.destroyed || this.paused) return
+      void this.flushAndTranscribe()
     }, QUIET_AFTER_SPEECH_MS)
   }
 
-  private clearWindowTimer(): void {
-    if (this.windowTimer) {
-      window.clearTimeout(this.windowTimer)
-      this.windowTimer = null
-    }
-  }
-
-  private scheduleWindow(): void {
-    if (this.destroyed || this.paused || this.windowTimer) return
-    this.windowTimer = window.setTimeout(() => {
-      this.windowTimer = null
-      void this.flushAndTranscribe().finally(() => {
-        if (!this.destroyed && !this.paused) {
-          this.scheduleWindow()
-        }
-      })
-    }, WINDOW_MS)
-  }
-
-  private async flushAndTranscribe(): Promise<void> {
-    if (this.destroyed || this.paused || this.transcribing) return
-
-    const rate = this.context?.sampleRate ?? 48000
-    const samples = downsampleTo16k(mergeFloat32(this.chunks), rate)
-    this.chunks = []
-    if (samples.length < MIN_SAMPLES) return
-    const rms = measureRms(samples)
-    if (rms < SPEECH_RMS_THRESHOLD) return
-
-    this.markSpeechActivity()
+  private enqueueTranscribe(samples: Float32Array): void {
+    this.pendingTranscribes += 1
     this.transcribing = true
+    this.transcribeStartedAt = Date.now()
+    this.transcribeChain = this.transcribeChain
+      .then(() => this.runTranscribe(samples))
+      .catch(() => {})
+      .finally(() => {
+        this.pendingTranscribes = Math.max(0, this.pendingTranscribes - 1)
+        this.transcribing = this.pendingTranscribes > 0
+      })
+  }
+
+  private async runTranscribe(samples: Float32Array): Promise<void> {
     try {
       const blob = encodeWav(samples, TARGET_SAMPLE_RATE)
-      const { text } = await transcribeAudio(blob)
-      const trimmed = text.trim()
-      if (trimmed) {
-        this.onInterim?.(trimmed)
+      const res = await Promise.race([
+        transcribeAudio(blob),
+        new Promise<never>((_, reject) => {
+          window.setTimeout(() => reject(new Error('转写超时')), TRANSCRIBE_TIMEOUT_MS)
+        }),
+      ])
+      const text = res.text.trim()
+      if (text) {
+        this.onInterim?.(text)
       }
+      this.onSpeechEnd?.()
     } catch (err) {
       const msg = err instanceof Error ? err.message : '讯飞转写失败'
+      if (/转写超时|timeout/i.test(msg)) {
+        this.onSpeechEnd?.()
+        return
+      }
       if (!/未识别到有效语音|20304|静音/.test(msg)) {
         this.onError?.(msg)
       }
-    } finally {
-      this.transcribing = false
     }
+  }
+
+  private flushAndTranscribe(): void {
+    if (this.destroyed || this.paused) return
+    const now = Date.now()
+    if (now - this.lastFlushAt < MIN_FLUSH_INTERVAL_MS) return
+    if (!this.chunks.length) return
+
+    const rate = this.context?.sampleRate ?? 48000
+    let samples = downsampleTo16k(mergeFloat32(this.chunks), rate)
+    this.chunks = []
+    this.speechActive = false
+
+    const maxSamples = TARGET_SAMPLE_RATE * MAX_TRANSCRIBE_SECONDS
+    if (samples.length > maxSamples) {
+      samples = samples.subarray(samples.length - maxSamples)
+    }
+    if (samples.length < MIN_SAMPLES) return
+    if (measureRms(samples) < SPEECH_RMS_THRESHOLD) return
+
+    this.lastFlushAt = now
+    this.echoGuardUntil = now + ECHO_GUARD_MS
+    this.enqueueTranscribe(samples)
   }
 
   stop(): void {
     this.destroyed = true
     this.paused = false
     this.transcribing = false
-    this.clearWindowTimer()
+    this.pendingTranscribes = 0
+    this.transcribeStartedAt = 0
+    this.transcribeChain = Promise.resolve()
     this.clearQuietTimer()
     this.teardownAudioNodes()
     this.stream?.getTracks().forEach((t) => t.stop())

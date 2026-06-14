@@ -73,7 +73,7 @@ export function isEdgeBrowser(): boolean {
 }
 
 export function createRecognition(
-  onResult: (text: string, isFinal: boolean) => void,
+  onResult: (text: string, isFinal: boolean, confidence?: number) => void,
   onError: (error: string) => void,
   onEnd?: () => void,
 ): SpeechRecognitionInstance | null {
@@ -94,13 +94,17 @@ export function createRecognition(
   recognition.onresult = (event) => {
     let transcript = ''
     let isFinal = false
+    let confidence: number | undefined
     for (let i = event.resultIndex; i < event.results.length; i++) {
-      const piece = event.results[i][0]?.transcript ?? ''
+      const alt = event.results[i][0]
+      const piece = alt?.transcript ?? ''
       transcript += piece
       if (event.results[i].isFinal) isFinal = true
+      const c = (alt as { confidence?: number } | undefined)?.confidence
+      if (c != null) confidence = Math.max(confidence ?? 0, c)
     }
     const text = transcript.trim()
-    if (text) onResult(text, isFinal)
+    if (text) onResult(text, isFinal, confidence)
   }
 
   recognition.onerror = (event) => onError(event.error)

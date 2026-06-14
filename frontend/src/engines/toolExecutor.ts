@@ -484,6 +484,46 @@ async function runExpandGridRegion(
   return `已向${direction}扩展 ${newCellIds.length} 格（${newCellIds.join('、')}）`
 }
 
+const CANVAS_CONTROL_LABELS: Record<string, string> = {
+  zoom_in: '已放大',
+  zoom_out: '已缩小',
+  zoom_to: '缩放已调整',
+  fit_window: '已适应窗口',
+  reset_view: '视图已复位',
+  clear: '画布已清空',
+  pan_left: '画布已左移',
+  pan_right: '画布已右移',
+  pan_up: '画布已上移',
+  pan_down: '画布已下移',
+  expand_left: '画布已向左扩展',
+  expand_right: '画布已向右扩展',
+  expand_top: '画布已向上扩展',
+  expand_bottom: '画布已向下扩展',
+}
+
+const GENERIC_CANVAS_REPLY = '画布已更新'
+
+/** 从工具执行结果生成语音反馈，避免重复「画布已更新」 */
+export function summarizeToolResults(
+  results: ExecutionResultItem[],
+  fallback: string,
+): string {
+  const messages = results
+    .filter((r) => r.success && r.message?.trim())
+    .map((r) => r.message!.trim())
+    .filter((m) => m !== GENERIC_CANVAS_REPLY)
+
+  const unique = [...new Set(messages)]
+  if (unique.length === 1) return unique[0]
+  if (unique.length > 1) {
+    return `${unique[unique.length - 1]}，共完成 ${unique.length} 步`
+  }
+
+  const fb = fallback.trim()
+  if (fb && fb !== GENERIC_CANVAS_REPLY) return fb
+  return results.some((r) => r.success) ? '已完成' : '未能执行该操作'
+}
+
 export async function executeTools(
   tools: ToolCall[],
   ctx: ExecutorContext,
@@ -704,20 +744,29 @@ export async function executeTools(
           break
         }
         if (!canvas) break
-        if (action === 'zoom_in') zoomCanvas(canvas, 1.2)
-        else if (action === 'zoom_out') zoomCanvas(canvas, 0.8)
-        else if (action === 'zoom_to') zoomTo(canvas, Number(args.value ?? 1))
-        else if (action === 'fit_window' || action === 'reset_view') fitWindow(canvas)
-        else if (action === 'clear') clearCanvas(canvas)
-        else if (action === 'pan_left') panCanvas(canvas, -panStep, 0)
-        else if (action === 'pan_right') panCanvas(canvas, panStep, 0)
-        else if (action === 'pan_up') panCanvas(canvas, 0, -panStep)
-        else if (action === 'pan_down') panCanvas(canvas, 0, panStep)
-        else if (action === 'expand_left') expandCanvasSize(canvas, 'left', panStep * 2)
-        else if (action === 'expand_right') expandCanvasSize(canvas, 'right', panStep * 2)
-        else if (action === 'expand_top') expandCanvasSize(canvas, 'top', panStep * 2)
-        else if (action === 'expand_bottom') expandCanvasSize(canvas, 'bottom', panStep * 2)
-        results.push({ tool: tool.name, success: true, message: '画布已更新' })
+        let applied = false
+        if (action === 'zoom_in') { zoomCanvas(canvas, 1.2); applied = true }
+        else if (action === 'zoom_out') { zoomCanvas(canvas, 0.8); applied = true }
+        else if (action === 'zoom_to') { zoomTo(canvas, Number(args.value ?? 1)); applied = true }
+        else if (action === 'fit_window' || action === 'reset_view') { fitWindow(canvas); applied = true }
+        else if (action === 'clear') { clearCanvas(canvas); applied = true }
+        else if (action === 'pan_left') { panCanvas(canvas, -panStep, 0); applied = true }
+        else if (action === 'pan_right') { panCanvas(canvas, panStep, 0); applied = true }
+        else if (action === 'pan_up') { panCanvas(canvas, 0, -panStep); applied = true }
+        else if (action === 'pan_down') { panCanvas(canvas, 0, panStep); applied = true }
+        else if (action === 'expand_left') { expandCanvasSize(canvas, 'left', panStep * 2); applied = true }
+        else if (action === 'expand_right') { expandCanvasSize(canvas, 'right', panStep * 2); applied = true }
+        else if (action === 'expand_top') { expandCanvasSize(canvas, 'top', panStep * 2); applied = true }
+        else if (action === 'expand_bottom') { expandCanvasSize(canvas, 'bottom', panStep * 2); applied = true }
+        if (applied) {
+          results.push({
+            tool: tool.name,
+            success: true,
+            message: CANVAS_CONTROL_LABELS[action] ?? GENERIC_CANVAS_REPLY,
+          })
+        } else {
+          results.push({ tool: tool.name, success: false, message: '未识别的画布操作' })
+        }
         break
       }
 

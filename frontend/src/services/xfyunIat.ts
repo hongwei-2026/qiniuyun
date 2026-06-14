@@ -1,4 +1,8 @@
 import { fetchXfyunIatAuth } from './api'
+import { loadXfyunPcmWorklet } from './xfyunWorklet'
+import { isMeaningfulTranscript } from './transcriptFilter'
+
+export { isMeaningfulTranscript }
 
 type IatResult = {
   ws?: { cw?: { w?: string }[] }[]
@@ -10,11 +14,6 @@ type IatResult = {
 const TARGET_SAMPLE_RATE = 16000
 /** 每帧约 200ms @16kHz，讯飞推荐 40ms~200ms 一包 */
 const CHUNK_SAMPLES_16K = 3200
-
-export function isMeaningfulTranscript(text: string): boolean {
-  const compact = text.replace(/[\s。，！？、.!?；;：:'"「」【】()（）,]/g, '')
-  return compact.length >= 2
-}
 
 function extractWords(result: IatResult): string {
   return (result.ws ?? [])
@@ -53,8 +52,6 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
   return btoa(binary)
 }
-
-let workletModuleLoaded = false
 
 function formatXfyunError(code: number | string | undefined, message: string): string {
   const msg = (message || '').trim()
@@ -182,10 +179,7 @@ export class XfyunMicPipeline {
     this.context = new AudioContext()
     this.source = this.context.createMediaStreamSource(this.stream!)
 
-    if (!workletModuleLoaded) {
-      await this.context.audioWorklet.addModule('/xfyun-pcm-processor.js')
-      workletModuleLoaded = true
-    }
+    await loadXfyunPcmWorklet(this.context)
 
     this.worklet = new AudioWorkletNode(this.context, 'xfyun-pcm-processor')
     this.worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {

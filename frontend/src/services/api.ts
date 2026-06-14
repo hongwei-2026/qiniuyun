@@ -127,6 +127,7 @@ export async function transcribeAudio(
   try {
     const { data } = await client.post('/api/v1/voice/transcribe', form, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 50000,
     })
     return data
   } catch (err) {

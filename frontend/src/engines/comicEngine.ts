@@ -706,24 +706,14 @@ function findProjectByKey(
 ) {
   let key = nameOrIndex.trim()
   if (!key) return undefined
-  key = key.replace(/^(?:请|帮我|给我)?(?:切换|打开|进入)(?:到|至|一下)?/u, '').trim()
+  key = key
+    .replace(/^(?:请|帮我|给我)?(?:切换|打开|进入|选择|选中|挑)(?:到|至|一下|为)?/u, '')
+    .replace(/^项目/u, '')
+    .trim()
   const normalized = key.replace(/\s/g, '')
 
-  const byName = projects.find(
-    (p) =>
-      p.name === key
-      || p.name.includes(key)
-      || key.includes(p.name)
-      || p.name.replace(/\s/g, '') === normalized
-      || new RegExp(`漫画\\s*${key}$`).test(p.name),
-  )
-  if (byName) return byName
-
-  if (!key.endsWith('漫画') && !key.endsWith('项目')) {
-    const withSuffix = projects.find(
-      (p) => p.name === `${key}漫画` || p.name === `${key}项目`,
-    )
-    if (withSuffix) return withSuffix
+  if (/默认/.test(key)) {
+    return projects.find((p) => /默认/.test(p.name)) ?? projects[0]
   }
 
   const num =
@@ -740,6 +730,27 @@ function findProjectByKey(
     })
     if (byNum) return byNum
     if (num <= projects.length) return projects[num - 1]
+  }
+
+  if (/^(漫画|项目)$/u.test(key) || key.length < 2) return undefined
+
+  const byExact = projects.find(
+    (p) =>
+      p.name === key
+      || p.name.replace(/\s/g, '') === normalized
+      || new RegExp(`漫画\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`).test(p.name),
+  )
+  if (byExact) return byExact
+
+  if (!key.endsWith('漫画') && !key.endsWith('项目')) {
+    const withSuffix = projects.find(
+      (p) => p.name === `${key}漫画` || p.name === `${key}项目`,
+    )
+    if (withSuffix) return withSuffix
+  }
+
+  if (key.length >= 3) {
+    return projects.find((p) => p.name.includes(key) || key.includes(p.name))
   }
   return undefined
 }

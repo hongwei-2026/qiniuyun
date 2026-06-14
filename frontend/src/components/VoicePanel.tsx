@@ -21,6 +21,7 @@ const MODE_LABELS = {
 
 export function VoicePanel() {
   const voiceMode = useAppStore((s) => s.voiceMode)
+  const voiceEnabled = useAppStore((s) => s.voiceEnabled)
   const voiceStatus = useAppStore((s) => s.voiceStatus)
   const transcript = useAppStore((s) => s.transcript)
   const lastReply = useAppStore((s) => s.lastReply)
@@ -50,12 +51,16 @@ export function VoicePanel() {
       <div className="panel-head">
         <h2>语音控制</h2>
         <span className="pill pill-sm">
-          {aiGenerating ? 'AI 生图中' : (STATUS_LABEL[voiceStatus] ?? voiceStatus)}
+          {!voiceEnabled
+            ? '语音已关闭'
+            : aiGenerating
+              ? 'AI 生图中'
+              : (STATUS_LABEL[voiceStatus] ?? voiceStatus)}
         </span>
       </div>
 
       <div
-        className={`mic-indicator ${voiceStatus === 'listening' || voiceStatus === 'awaiting_activation' ? 'active' : ''}`}
+        className={`mic-indicator ${voiceEnabled && (voiceStatus === 'listening' || voiceStatus === 'awaiting_activation') ? 'active' : ''}`}
         role="button"
         tabIndex={0}
         onClick={restartListening}
@@ -66,7 +71,9 @@ export function VoicePanel() {
           <MicIcon className="mic-svg" />
         </div>
         <p className="mic-label">
-          {voiceStatus === 'awaiting_activation'
+          {!voiceEnabled
+            ? '语音已关闭，按 Q 开启'
+            : voiceStatus === 'awaiting_activation'
             ? '语音初始化中，请说开始聆听'
             : voiceStatus === 'listening'
             ? asrProvider === 'xfyun'
@@ -114,11 +121,10 @@ export function VoicePanel() {
         </button>
       </div>
       <p className="voice-asr-hint">
-        {voiceMode === 'continuous' && asrProvider === 'browser'
-          ? '浏览器识别会周期性断开，系统会自动重连；失效请点「重新聆听」或换讯飞'
-          : voiceMode === 'continuous'
-            ? '连续模式：一口气说完约 1～2 秒即执行；句中停顿会自动延长等待'
-            : '若无识别结果，请先点「重新聆听」或点一下麦克风区域'}
+        快捷键：<kbd>Q</kbd> 开关语音识别
+        {!voiceEnabled
+          ? '（当前已关闭）'
+          : ' · 说完一句会自动执行；碎片如「正方形」不会单独触发'}
       </p>
 
       <section className="panel-section">
@@ -126,7 +132,7 @@ export function VoicePanel() {
         <dl className="config-dl">
           <dt>画布</dt><dd>{canvasLabels[canvasMode]}</dd>
           <dt>绘图</dt><dd>{canvasMode === 'grid' ? `九宫格 AI · ${imageProvider === 'minimax' ? 'MiniMax' : '豆包'}` : canvasMode === 'comic' ? `漫画 AI · ${imageProvider === 'minimax' ? 'MiniMax' : '豆包'}` : canvasMode === 'ai' ? `AI · ${imageProvider === 'minimax' ? 'MiniMax' : '豆包'}` : '矢量（默认）'}</dd>
-          <dt>采集</dt><dd>{voiceMode === 'continuous' ? '连续断句' : '单次说话'}</dd>
+          <dt>语音</dt><dd>{voiceEnabled ? '聆听中' : '已关闭（按 Q 开启）'}</dd>
           <dt>LLM</dt><dd>{MODE_LABELS[deepseekMode]}</dd>
           <dt>识别</dt><dd>{asrProvider === 'xfyun' ? '讯飞极速转写' : '浏览器实时识别'}</dd>
         </dl>

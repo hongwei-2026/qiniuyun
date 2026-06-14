@@ -16,17 +16,26 @@ export function matchSystemCommand(text: string): string | null {
   return null
 }
 
+let activeSpeakId = 0
+
 export function speak(text: string, onEnd?: () => void) {
   if (!('speechSynthesis' in window)) {
     onEnd?.()
     return
   }
+  const speakId = ++activeSpeakId
   window.speechSynthesis.cancel()
   const utterance = new SpeechSynthesisUtterance(text)
   utterance.lang = 'zh-CN'
   utterance.rate = 1.05
-  utterance.onend = () => onEnd?.()
-  utterance.onerror = () => onEnd?.()
+  let finished = false
+  const finish = () => {
+    if (finished || speakId !== activeSpeakId) return
+    finished = true
+    onEnd?.()
+  }
+  utterance.onend = finish
+  utterance.onerror = finish
   window.speechSynthesis.speak(utterance)
 }
 

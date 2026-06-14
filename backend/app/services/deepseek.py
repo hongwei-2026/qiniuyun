@@ -101,6 +101,21 @@ class DeepSeekService:
             tools.append(ToolCall(name=fn.name, arguments=args))
         return tools
 
+    def _canvas_control_reply(self, tool: ToolCall) -> str:
+        action = str((tool.arguments or {}).get("action") or "")
+        labels = {
+            "zoom_in": "已放大",
+            "zoom_out": "已缩小",
+            "fit_window": "已适应窗口",
+            "reset_view": "视图已复位",
+            "clear": "画布已清空",
+            "pan_left": "画布已左移",
+            "pan_right": "画布已右移",
+            "pan_up": "画布已上移",
+            "pan_down": "画布已下移",
+        }
+        return labels.get(action, "已完成")
+
     def _extract_reply(self, message: Any, tools: list[ToolCall]) -> str:
         content = (getattr(message, "content", None) or "").strip()
         if content:
@@ -114,7 +129,7 @@ class DeepSeekService:
             "save_canvas": "已保存",
             "set_style": "样式已更新",
             "object_transform": "变换完成",
-            "canvas_control": "画布已更新",
+            "canvas_control": self._canvas_control_reply(tools[0]),
             "delete_object": "已删除",
             "grid_redraw": "格子已重绘",
             "grid_expand": "格子已扩展",

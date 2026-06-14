@@ -37,11 +37,11 @@
 
 ## Demo 视频
 
-> **（待补充）** 请将 B 站/云盘链接更新到此处。
+> 赛题要求：视频上传 **B 站/云盘**，在 README 填写可访问链接（**勿将 1GB+ mp4 推入 GitHub**）。
 
-```
-Demo 链接：（上传后填写）
-```
+本地录制文件：`docs/demo/voicecanvas-demo.mp4`（约 1.1GB，已在 `.gitignore` 中）
+
+**Demo 链接：（上传 B 站/云盘后填写，例如 `https://www.bilibili.com/video/BVxxxx`）**
 
 演示要求：语音讲解 + **纯语音操作**完整流程（见 [PROJECT_GUIDE.md](PROJECT_GUIDE.md) 第七节）。
 
@@ -167,7 +167,7 @@ qiniuyun/
 - [x] 语音指令说明 `docs/VOICE_COMMANDS.md`
 - [x] 主分支可克隆运行（配置 `.env` 后）
 - [x] `.env` / 真实 API Key **不进入版本库**
-- [ ] Demo 视频链接（待上传后写入上文 Demo 一节）
+- [ ] Demo 视频外链（本地 `docs/demo/voicecanvas-demo.mp4` → 上传 B 站/云盘后写入 README）
 - [ ] 持续 PR / commit 记录（开发过程中补充）
 
 ---
